@@ -24,7 +24,7 @@ Abstract (study summary)
   - Builds composite binary outcome `Complication` from complication indicator columns.
   - Saves cleaned CSV to `D:\NSQIP_2022_Cleaned.csv`.
 
-- `preprocessing.py`  
+- `data_cleaning.py`  
   Modeling, HPO, evaluation, and calibration:
   - Loads an encoded CSV (`D:Encoded_Data.csv`) with selected features.
   - Downsamples majority class to ~1:9 ratio, splits data (90/10) stratified.
