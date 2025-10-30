@@ -1,0 +1,56 @@
+# =====================================================
+# SHAP Analysis for LightGBM Model
+# =====================================================
+import shap
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Load your LightGBM model if not already in memory
+from joblib import load
+model_path = r"LightGBM_Model_Saved.joblib"
+model = load(model_path)
+
+print(" Loaded LightGBM model for SHAP analysis.")
+
+# --- Select background sample for SHAP explainer ---
+# To keep computation fast, use a random sample of the training data
+X_background = X_train.sample(n=min(500, len(X_train)), random_state=42)
+
+# --- Create SHAP explainer ---
+explainer = shap.Explainer(model, X_background)
+shap_values = explainer(X_test)
+
+# --- Global Feature Importance ---
+plt.title("SHAP Summary Plot (Global Feature Importance)")
+shap.summary_plot(shap_values, X_test, show=False)
+plt.tight_layout()
+plt.show()
+
+# --- Feature Impact on Individual Predictions ---
+# (each point = one patient, color = feature value)
+plt.title("SHAP Beeswarm Plot")
+shap.summary_plot(shap_values, X_test, plot_type="violin", show=False)
+plt.tight_layout()
+plt.show()
+
+# --- Mean absolute SHAP values (bar chart) ---
+plt.title("Mean Absolute SHAP Values (Feature Importance)")
+shap.summary_plot(shap_values, X_test, plot_type="bar", show=False)
+plt.tight_layout()
+plt.show()
+
+# --- Force plot for one sample ---
+sample_index = 5  # pick any index from test set
+print(f"\n Generating SHAP force plot for test sample #{sample_index}...")
+shap.initjs()
+shap.force_plot(explainer.expected_value, shap_values[sample_index].values, X_test.iloc[sample_index, :])
+
+# --- Optional: Save mean SHAP importance values ---
+shap_importance = np.abs(shap_values.values).mean(axis=0)
+shap_summary = pd.DataFrame({
+    "Feature": X_test.columns,
+    "Mean_SHAP_Abs": shap_importance
+}).sort_values(by="Mean_SHAP_Abs", ascending=False)
+
+print("\n Top 10 most influential features based on SHAP values:")
+print(shap_summary.head(10))
