@@ -1,0 +1,229 @@
+# =====================================================
+# Model Training, Evaluation, and Calibration Curves
+# =====================================================
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.model_selection import StratifiedKFold, train_test_split, GridSearchCV, cross_val_score
+from sklearn.metrics import roc_auc_score, brier_score_loss, roc_curve
+from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier, GradientBoostingClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.naive_bayes import GaussianNB
+from lightgbm import LGBMClassifier
+from xgboost import XGBClassifier
+from catboost import CatBoostClassifier
+from sklearn.utils import resample
+from sklearn.calibration import calibration_curve
+import joblib
+import warnings
+
+warnings.filterwarnings("ignore")
+
+# =====================================================
+# Load Dataset
+# =====================================================
+file_path = r"D:Encoded_Data.csv"
+df = pd.read_csv(file_path)
+
+target = "Complication"
+features = ["PRSEPIS", "ASACLAS", "PRNCPTX", "VENTILAT", "CASETYPE", "PRBUN"]
+
+# =====================================================
+# Downsample Majority Class (1:9 ratio)
+# =====================================================
+df_majority = df[df[target] == 0]
+df_minority = df[df[target] == 1]
+desired_majority = int(len(df_minority) * 9)
+
+df_majority_down = resample(df_majority, replace=False, n_samples=desired_majority, random_state=42)
+df_balanced = pd.concat([df_majority_down, df_minority]).sample(frac=1, random_state=42).reset_index(drop=True)
+
+print(f" After downsampling: {df_balanced[target].value_counts().to_dict()}")
+
+X = df_balanced[features]
+y = df_balanced[target]
+
+# =====================================================
+# Train/Test Split (90% / 10%)
+# =====================================================
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.10, stratify=y, random_state=42)
+
+# =====================================================
+# Define Models & Hyperparameter Grids
+# =====================================================
+param_grids = {
+    "LightGBM": {
+        "learning_rate": [0.01, 0.05, 0.1],
+        "num_leaves": [31, 63, 127],
+        "max_depth": [3, 5, 7],
+        "reg_alpha": [0, 5],
+        "reg_lambda": [0, 5],
+        "scale_pos_weight": [1, 2, 3],
+    },
+    "XGBoost": {
+        "learning_rate": [0.01, 0.05, 0.1],
+        "max_depth": [3, 5, 7],
+        "n_estimators": [100, 300],
+        "reg_alpha": [0, 5],
+        "reg_lambda": [0, 5],
+        "scale_pos_weight": [1, 2, 3],
+    },
+    "CatBoost": {
+        "depth": [4, 6, 8],
+        "learning_rate": [0.01, 0.05, 0.1],
+        "l2_leaf_reg": [1, 3, 5],
+        "iterations": [200, 400],
+        "scale_pos_weight": [1, 2, 3],
+    },
+    "RandomForest": {
+        "n_estimators": [100, 300, 500],
+        "max_depth": [5, 10, 15],
+        "min_samples_split": [2, 5],
+        "min_samples_leaf": [1, 2],
+        "class_weight": ["balanced", "balanced_subsample"],
+    },
+    "AdaBoost": {
+        "n_estimators": [100, 300],
+        "learning_rate": [0.5, 1.0],
+    },
+    "GradientBoost": {
+        "n_estimators": [100, 300],
+        "learning_rate": [0.05, 0.1],
+        "max_depth": [3, 5],
+    },
+    "NaiveBayes": {
+        "var_smoothing": [1e-9, 1e-8, 1e-7],
+    },
+    "LogisticRegression": {
+        "C": [0.01, 0.1, 1, 10],
+        "penalty": ["l2"],
+        "solver": ["lbfgs"],
+    },
+}
+
+models = {
+    "LightGBM": LGBMClassifier(random_state=42),
+    "XGBoost": XGBClassifier(use_label_encoder=False, eval_metric="auc", random_state=42),
+    "AdaBoost": AdaBoostClassifier(random_state=42),
+    "GradientBoost": GradientBoostingClassifier(random_state=42),
+    "CatBoost": CatBoostClassifier(verbose=0, random_state=42),
+    "NaiveBayes": GaussianNB(),
+    "RandomForest": RandomForestClassifier(random_state=42),
+    "LogisticRegression": LogisticRegression(max_iter=1000, random_state=42),
+}
+
+# =====================================================
+# Hyperparameter Optimization & Evaluation
+# =====================================================
+cv = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
+results = []
+plt.figure(figsize=(10, 8))
+
+for name, model in models.items():
+    print(f"\n Optimizing {name}...")
+    grid = GridSearchCV(model, param_grids[name], scoring="roc_auc", cv=cv, n_jobs=-1, verbose=1)
+    grid.fit(X_train, y_train)
+    best_model = grid.best_estimator_
+
+    y_train_prob = best_model.predict_proba(X_train)[:, 1]
+    y_test_prob = best_model.predict_proba(X_test)[:, 1]
+
+    train_auc = roc_auc_score(y_train, y_train_prob)
+    test_auc = roc_auc_score(y_test, y_test_prob)
+
+    # Bootstrap 95% CI
+    rng = np.random.RandomState(42)
+    scores = [roc_auc_score(y_test.iloc[idxs], y_test_prob[idxs])
+              for idxs in [rng.randint(0, len(y_test), len(y_test)) for _ in range(2000)]
+              if len(np.unique(y_test.iloc[idxs])) > 1]
+    ci_lower, ci_upper = np.percentile(np.sort(scores), [2.5, 97.5])
+
+    # Cross-validation mean AUROC
+    cv_auc = cross_val_score(best_model, X_train, y_train, cv=cv, scoring="roc_auc", n_jobs=-1).mean()
+
+    brier = brier_score_loss(y_test, y_test_prob)
+
+    results.append({
+        "Model": name,
+        "Train_AUROC": train_auc,
+        "Test_AUROC": test_auc,
+        "Test_95%_CI_Lower": ci_lower,
+        "Test_95%_CI_Upper": ci_upper,
+        "CV_Mean_AUROC": cv_auc,
+        "Brier_Score": brier,
+        "Best_Params": grid.best_params_,
+    })
+
+    fpr, tpr, _ = roc_curve(y_test, y_test_prob)
+    plt.plot(fpr, tpr, label=f"{name} (AUC={test_auc:.3f}, 95%CI={ci_lower:.3f}-{ci_upper:.3f})")
+
+plt.plot([0, 1], [0, 1], "k--", alpha=0.6)
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("Test AUROC Curves (HPO + Downsampled 1:9)")
+plt.legend(fontsize=8, loc="lower right")
+plt.grid(alpha=0.4)
+plt.tight_layout()
+plt.show()
+
+# =====================================================
+# Save Best Model
+# =====================================================
+results_df = pd.DataFrame(results).sort_values(by="Test_AUROC", ascending=False)
+print("\n Model Performance Summary:")
+print(results_df.round(4))
+
+best_model_name = results_df.iloc[0]["Model"]
+best_params = results_df.iloc[0]["Best_Params"]
+
+final_model = models[best_model_name].set_params(**best_params)
+final_model.fit(X_train, y_train)
+joblib.dump(final_model, f"{best_model_name}_best_model.pkl")
+print(f"\n Saved best model: {best_model_name}_best_model.pkl")
+
+# =====================================================
+# Calibration Curves
+# =====================================================
+print("\n📈 Plotting Calibration Curves...")
+fig, axes = plt.subplots(2, 4, figsize=(14, 7), dpi=300)
+axes = axes.flatten()
+
+custom_colors = {
+    "LightGBM": "#1f77b4",
+    "XGBoost": "#ff7f0e",
+    "AdaBoost": "#2ca02c",
+    "GradientBoost": "#800000",
+    "CatBoost": "#4B0082",
+    "NaiveBayes": "#8B4513",
+    "RandomForest": "#DA70D6",
+    "LogisticRegression": "#808080",
+}
+
+for i, row in enumerate(results_df.itertuples()):
+    name, brier = row.Model, row.Brier_Score
+    color = custom_colors.get(name, "#333333")
+    params = row.Best_Params
+
+    model = type(models[name])().set_params(**params)
+    model.fit(X_train, y_train)
+
+    if hasattr(model, "predict_proba"):
+        y_prob = model.predict_proba(X_test)[:, 1]
+        prob_true, prob_pred = calibration_curve(y_test, y_prob, n_bins=10, strategy="uniform")
+
+        ax = axes[i]
+        ax.plot(prob_pred, prob_true, "s-", color=color, lw=2, label=name)
+        ax.plot([0, 1], [0, 1], "k--", lw=1)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.set_title(f"{name}\nBrier={brier:.4f}", fontsize=9, weight="bold")
+        ax.legend(fontsize=7, loc="upper left")
+        ax.grid(alpha=0.3)
+
+for j in range(i + 1, len(axes)):
+    fig.delaxes(axes[j])
+
+plt.suptitle("Calibration Curves (Best HPO Models, 1:9 Downsampled Dataset)", fontsize=14, weight="bold")
+plt.tight_layout(rect=[0, 0, 1, 0.95])
+plt.show()
